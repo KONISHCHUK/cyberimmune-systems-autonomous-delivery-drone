@@ -126,8 +126,17 @@ int main(void) {
     //The flight is need to be controlled from now on
     //Also we need to check on ORVD, whether the flight is still allowed or it is need to be paused
 
-    while (true)
-        sleep(1000);
+     while (true) {
+        int32_t latitude, longitude, altitude;
+        if (!getCoords(latitude, longitude, altitude)) {
+            fprintf(stderr, "[%s] Warning: lost connection with drone\n", ENTITY_NAME);
+        }
+        else {
+            fprintf(stderr, "[%s] Current coordinates >>>>> latitude: %d, longitude: %d, altitude: %d \n", ENTITY_NAME,
+                latitude, longitude, altitude);
+        }
+        sleep(1);
+    }
 
     return EXIT_SUCCESS;
 }
