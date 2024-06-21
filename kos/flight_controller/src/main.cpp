@@ -125,8 +125,10 @@ int main(void) {
     //If we get here, the drone is able to arm and start the mission
     //The flight is need to be controlled from now on
     //Also we need to check on ORVD, whether the flight is still allowed or it is need to be paused
+    
+    int32_t CONSTANT_SPEED = 1;
 
-     while (true) {
+    while (true) {
         int32_t latitude, longitude, altitude;
         if (!getCoords(latitude, longitude, altitude)) {
             fprintf(stderr, "[%s] Warning: lost connection with drone\n", ENTITY_NAME);
@@ -135,6 +137,21 @@ int main(void) {
             fprintf(stderr, "[%s] Current coordinates >>>>> latitude: %d, longitude: %d, altitude: %d \n", ENTITY_NAME,
                 latitude, longitude, altitude);
         }
+
+        // Ensure cargo drop is always disabled
+        if (!setCargoLock(0)) {
+            fprintf(stderr, "[%s] Warning: Failed to disable cargo drop\n", ENTITY_NAME);
+        } else {
+            fprintf(stderr, "[%s] Info: Cargo drop is disabled\n", ENTITY_NAME);
+        }
+
+        // Ensure constant speed
+        if (!changeSpeed(CONSTANT_SPEED)) {
+            fprintf(stderr, "[%s] Warning: Failed to set constant speed\n", ENTITY_NAME);
+        } else {
+            fprintf(stderr, "[%s] Info: Speed set to %d m/s\n", ENTITY_NAME, CONSTANT_SPEED);
+        }
+
         sleep(1);
     }
 
