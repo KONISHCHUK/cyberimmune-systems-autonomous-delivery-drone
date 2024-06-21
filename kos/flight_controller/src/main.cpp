@@ -43,6 +43,49 @@ int sendSignedMessage(char* method, char* response, char* errorMessage, uint8_t 
     return 1;
 }
 
+extern uint32_t commandNum;
+extern MissionCommand* commands;
+
+// finding next waypoint
+uint32_t getNextWayPoint(uint32_t start) {
+    for (uint32_t i = start; i < commandNum; i++) {
+        if (commands[i].type == CommandType::WAYPOINT) {
+            return i;
+        }
+    }
+    return commandNum;
+}
+
+// converting to real position
+void getPosition(
+    int32_t latitude,
+    int32_t longitude,
+    int32_t altitude,
+    double& x,
+    double& y,
+    double& z) {
+    x = latitude;
+    y = longitude;
+
+    z = altitude;
+}
+
+// finding distance between two points
+double getDist(
+    double x, 
+    double y, 
+    double z, 
+    double x2, 
+    double y2, 
+    double z2) {
+    double dx = std::abs(x - x2);
+    double dy = std::abs(y - y2);
+    double dz = std::abs(z - z2);
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+
+
 int main(void) {
     //Before do anything, we need to ensure, that other modules are ready to work
     while (!waitForInit("periphery_controller_connection", "PeripheryController")) {
@@ -126,7 +169,25 @@ int main(void) {
     //The flight is need to be controlled from now on
     //Also we need to check on ORVD, whether the flight is still allowed or it is need to be paused
     
-    int32_t CONSTANT_SPEED = 1;
+    const uint32_t CONSTANT_SPEED = 1, CONSTANT_ALTITUDE = 200;
+    const double ACHIVE_DIST = 100;
+    const uint32_t MILLISEC_DELAY = 1000;
+
+    uint32_t homeLevel = commands[0].content.waypoint.altitude;
+
+    uint32_t curWayPoint = getNextWayPoint(0);  
+    double xwp, ywp, zwp;      
+    if (curWayPoint == commandNum) {
+        fprintf(stderr, "[%s] Warning: no waypoints\n", ENTITY_NAME);
+    }
+    else {
+        getPosition(commands[curWayPoint].content.waypoint.latitude,
+                    commands[curWayPoint].content.waypoint.longitude,
+                    commands[curWayPoint].content.waypoint.altitude,
+                    xwp,
+                    ywp,
+                    zwp);
+    }
 
     while (true) {
         int32_t latitude, longitude, altitude;
@@ -134,9 +195,38 @@ int main(void) {
             fprintf(stderr, "[%s] Warning: lost connection with drone\n", ENTITY_NAME);
         }
         else {
+            altitude -= homeLevel;
             fprintf(stderr, "[%s] Current coordinates >>>>> latitude: %d, longitude: %d, altitude: %d \n", ENTITY_NAME,
                 latitude, longitude, altitude);
+            double xcur, ycur, zcur;
+            getPosition(latitude,
+                        longitude,
+                        altitude,
+                        xcur,
+                        ycur,
+                        zcur);
+            // get next waypoint
+            if (curWayPoint < commandNum && 
+                getDist(xcur, ycur, zcur, xwp, ywp, zwp) < ACHIVE_DIST) {
+                curWayPoint = getNextWayPoint(curWayPoint + 1);
+                if (curWayPoint < commandNum) {
+                    fprintf(stderr, "[%s] Info: going to the next waypoint\n", ENTITY_NAME);
+                    getPosition(commands[curWayPoint].content.waypoint.latitude,
+                                commands[curWayPoint].content.waypoint.longitude,
+                                commands[curWayPoint].content.waypoint.altitude,
+                                xwp,
+                                ywp,
+                                zwp);
+                }
+            }
         }
+
+        // // Ensure altitude is constant
+        // if (!changeAltitude(CONSTANT_ALTITUDE)) {
+        //     fprintf(stderr, "[%s] Warning: Failed to set constant altitude\n", ENTITY_NAME);
+        // } else {
+        //     fprintf(stderr, "[%s] Info: Altitude set to %d cm\n", ENTITY_NAME, CONSTANT_ALTITUDE);
+        // }
 
         // Ensure cargo drop is always disabled
         if (!setCargoLock(0)) {
@@ -152,7 +242,8 @@ int main(void) {
             fprintf(stderr, "[%s] Info: Speed set to %d m/s\n", ENTITY_NAME, CONSTANT_SPEED);
         }
 
-        sleep(1);
+
+        usleep(MILLISEC_DELAY);
     }
 
     return EXIT_SUCCESS;
