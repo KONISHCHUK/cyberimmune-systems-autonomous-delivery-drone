@@ -211,7 +211,7 @@ int main(void) {
     // If we get here, the drone is able to arm and start the mission
     // The flight needs to be controlled from now on
     // Also we need to check on ORVD whether the flight is still allowed or needs to be paused
-    const uint32_t CONSTANT_SPEED = 1;
+    const uint32_t CONSTANT_SPEED = 2;
     const double WAYPOINT_REACHED_RADIUS = 1.0; // Radius in meters
 
     // Get initial home altitude
