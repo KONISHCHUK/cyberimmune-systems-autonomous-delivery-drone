@@ -7,48 +7,93 @@
 #include "../../shared/include/ipc_messages_periphery_controller.h"
 #include "../../shared/include/ipc_messages_server_connector.h"
 
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include <unistd.h>
+#include <ctime>
+#include <limits>
+#include <algorithm>
 
 #define RETRY_DELAY_SEC 1
 #define RETRY_REQUEST_DELAY_SEC 5
 #define FLY_ACCEPT_PERIOD_US 500000
+#define EARTH_RADIUS 6371000.0 // Радиус Земли в метрах
 
-int sendSignedMessage(char* method, char* response, char* errorMessage, uint8_t delay) {
+extern uint32_t commandNum;
+extern MissionCommand* commands;
+
+// Declare changeWaypoint function
+extern int changeWaypoint(int32_t latitude, int32_t longitude, int32_t altitude);
+
+// Declare additional functions
+uint32_t getNextWayPoint(uint32_t startIndex);
+void getPosition(int32_t latitude, int32_t longitude, int32_t altitude, double& posX, double& posY, double& posZ);
+double perpendicularDistance3D(double x, double y, double z, double x1, double y1, double z1, double x2, double y2, double z2);
+double distance3D(double x1, double y1, double z1, double x2, double y2, double z2);
+
+// Function to calculate perpendicular distance from a point to a line segment in 3D space
+double perpendicularDistance3D(double x, double y, double z, double x1, double y1, double z1, double x2, double y2, double z2) {
+    double A = x - x1;
+    double B = y - y1;
+    double C = z - z1;
+    double D = x2 - x1;
+    double E = y2 - y1;
+    double F = z2 - z1;
+    double dot = A * D + B * E + C * F;
+    double len_sq = D * D + E * E + F * F;
+    double param = (len_sq != 0) ? (dot / len_sq) : -1;
+    double xx, yy, zz;
+    if (param < 0) {
+        xx = x1;
+        yy = y1;
+        zz = z1;
+    } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+        zz = z2;
+    } else {
+        xx = x1 + param * D;
+        yy = y1 + param * E;
+        zz = z1 + param * F;
+    }
+    double dx = x - xx;
+    double dy = y - yy;
+    double dz = z - zz;
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Function to calculate the distance between two points in 3D space
+double distance3D(double x1, double y1, double z1, double x2, double y2, double z2) {
+    return sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2) + pow(z2 - z1, 2));
+}
+
+int sendSignedMessage(const char* method, char* response, const char* errorMessage, uint8_t delay) {
     char message[512] = {0};
     char signature[257] = {0};
     char request[1024] = {0};
     snprintf(message, 512, "%s?%s", method, BOARD_ID);
-
     while (!signMessage(message, signature)) {
         fprintf(stderr, "[%s] Warning: Failed to sign %s message at Credential Manager. Trying again in %ds\n", ENTITY_NAME, errorMessage, delay);
         sleep(delay);
     }
     snprintf(request, 1024, "%s&sig=0x%s", message, signature);
-
     while (!sendRequest(request, response)) {
         fprintf(stderr, "[%s] Warning: Failed to send %s request through Server Connector. Trying again in %ds\n", ENTITY_NAME, errorMessage, delay);
         sleep(delay);
     }
-
     uint8_t authenticity = 0;
     while (!checkSignature(response, authenticity) || !authenticity) {
         fprintf(stderr, "[%s] Warning: Failed to check signature of %s response received through Server Connector. Trying again in %ds\n", ENTITY_NAME, errorMessage, delay);
         sleep(delay);
     }
-
     return 1;
 }
 
-extern uint32_t commandNum;
-extern MissionCommand* commands;
-
-// finding next waypoint
-uint32_t getNextWayPoint(uint32_t start) {
-    for (uint32_t i = start; i < commandNum; i++) {
+// Function to find the next waypoint
+uint32_t getNextWayPoint(uint32_t startIndex) {
+    for (uint32_t i = startIndex; i < commandNum; i++) {
         if (commands[i].type == CommandType::WAYPOINT) {
             return i;
         }
@@ -56,38 +101,33 @@ uint32_t getNextWayPoint(uint32_t start) {
     return commandNum;
 }
 
-// converting to real position
-void getPosition(
-    int32_t latitude,
-    int32_t longitude,
-    int32_t altitude,
-    double& x,
-    double& y,
-    double& z) {
-    x = latitude;
-    y = longitude;
-
-    z = altitude;
+// Function to convert coordinates to real positions
+void getPosition(int32_t latitude, int32_t longitude, int32_t altitude, double& posX, double& posY, double& posZ) {
+    posX = static_cast<double>(latitude) / 1e7 * EARTH_RADIUS * M_PI / 180.0; // Convert to meters
+    posY = static_cast<double>(longitude) / 1e7 * EARTH_RADIUS * M_PI / 180.0; // Convert to meters
+    posZ = static_cast<double>(altitude) / 100.0; // Convert to meters from centimeters
 }
 
-// finding distance between two points
-double getDist(
-    double x, 
-    double y, 
-    double z, 
-    double x2, 
-    double y2, 
-    double z2) {
-    double dx = std::abs(x - x2);
-    double dy = std::abs(y - y2);
-    double dz = std::abs(z - z2);
-    return sqrt(dx * dx + dy * dy + dz * dz);
+uint32_t getClosestSegment(double currentX, double currentY, double currentZ, double& minDistance) {
+    uint32_t closestSegment = 0;
+    minDistance = std::numeric_limits<double>::max();
+    for (uint32_t i = 1; i < commandNum; i++) {
+        if (commands[i].type != CommandType::WAYPOINT || commands[i - 1].type != CommandType::WAYPOINT) continue;
+        double segmentStartX, segmentStartY, segmentStartZ;
+        double segmentEndX, segmentEndY, segmentEndZ;
+        getPosition(commands[i - 1].content.waypoint.latitude, commands[i - 1].content.waypoint.longitude, commands[i - 1].content.waypoint.altitude, segmentStartX, segmentStartY, segmentStartZ);
+        getPosition(commands[i].content.waypoint.latitude, commands[i].content.waypoint.longitude, commands[i].content.waypoint.altitude, segmentEndX, segmentEndY, segmentEndZ);
+        double distance = perpendicularDistance3D(currentX, currentY, currentZ, segmentStartX, segmentStartY, segmentStartZ, segmentEndX, segmentEndY, segmentEndZ);
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestSegment = i;
+        }
+    }
+    return closestSegment;
 }
-
-
 
 int main(void) {
-    //Before do anything, we need to ensure, that other modules are ready to work
+    // Ensure that other modules are ready to work
     while (!waitForInit("periphery_controller_connection", "PeripheryController")) {
         fprintf(stderr, "[%s] Warning: Failed to receive initialization notification from Periphery Controller. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
         sleep(RETRY_DELAY_SEC);
@@ -108,18 +148,20 @@ int main(void) {
         fprintf(stderr, "[%s] Warning: Failed to receive initialization notification from Credential Manager. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
         sleep(RETRY_DELAY_SEC);
     }
+
     fprintf(stderr, "[%s] Info: Initialization is finished\n", ENTITY_NAME);
 
-    //Enable buzzer to indicate, that all modules has been initialized
-    if (!enableBuzzer())
+    // Enable buzzer to indicate that all modules have been initialized
+    if (!enableBuzzer()) {
         fprintf(stderr, "[%s] Warning: Failed to enable buzzer at Periphery Controller\n", ENTITY_NAME);
+    }
 
-    //Copter need to be registered at ORVD
+    // Copter needs to be registered at ORVD
     char authResponse[1024] = {0};
     sendSignedMessage("/api/auth", authResponse, "authentication", RETRY_DELAY_SEC);
     fprintf(stderr, "[%s] Info: Successfully authenticated on the server\n", ENTITY_NAME);
 
-    //Constantly ask server, if mission for the drone is available. Parse it and ensure, that mission is correct
+    // Constantly ask server if mission for the drone is available. Parse it and ensure that mission is correct
     while (true) {
         char missionResponse[1024] = {0};
         if (sendSignedMessage("/api/fmission_kos", missionResponse, "mission", RETRY_DELAY_SEC) && parseMission(missionResponse)) {
@@ -130,109 +172,171 @@ int main(void) {
         sleep(RETRY_REQUEST_DELAY_SEC);
     }
 
-    //The drone is ready to arm
+    // The drone is ready to arm
     fprintf(stderr, "[%s] Info: Ready to arm\n", ENTITY_NAME);
+
     while (true) {
-        //Wait, until autopilot wants to arm (and fails so, as motors are disabled by default)
+        // Wait until autopilot wants to arm (and fails as motors are disabled by default)
         while (!waitForArmRequest()) {
             fprintf(stderr, "[%s] Warning: Failed to receive an arm request from Autopilot Connector. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
             sleep(RETRY_DELAY_SEC);
         }
         fprintf(stderr, "[%s] Info: Received arm request. Notifying the server\n", ENTITY_NAME);
 
-        //When autopilot asked for arm, we need to receive permission from ORVD
-        char armRespone[1024] = {0};
-        sendSignedMessage("/api/arm", armRespone, "arm", RETRY_DELAY_SEC);
-
-        if (strstr(armRespone, "$Arm: 0#") != NULL) {
-            //If arm was permitted, we enable motors
+        // When autopilot asked for arm, we need to receive permission from ORVD
+        char armResponse[1024] = {0};
+        sendSignedMessage("/api/arm", armResponse, "arm", RETRY_DELAY_SEC);
+        if (strstr(armResponse, "$Arm: 0#") != NULL) {
+            // If arm was permitted, enable motors
             fprintf(stderr, "[%s] Info: Arm is permitted\n", ENTITY_NAME);
             while (!setKillSwitch(true)) {
                 fprintf(stderr, "[%s] Warning: Failed to permit motor usage at Periphery Controller. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
                 sleep(RETRY_DELAY_SEC);
             }
-            if (!permitArm())
+            if (!permitArm()) {
                 fprintf(stderr, "[%s] Warning: Failed to permit arm through Autopilot Connector\n", ENTITY_NAME);
+            }
             break;
-        }
-        else if (strstr(armRespone, "$Arm: 1#") != NULL) {
+        } else if (strstr(armResponse, "$Arm: 1#") != NULL) {
             fprintf(stderr, "[%s] Info: Arm is forbidden\n", ENTITY_NAME);
-            if (!forbidArm())
+            if (!forbidArm()) {
                 fprintf(stderr, "[%s] Warning: Failed to forbid arm through Autopilot Connector\n", ENTITY_NAME);
-        }
-        else
+            }
+        } else {
             fprintf(stderr, "[%s] Warning: Failed to parse server response\n", ENTITY_NAME);
-        fprintf(stderr, "[%s] Warning: Arm was not allowed. Waiting for another arm request from autopilot\n", ENTITY_NAME);
-    };
-
-    //If we get here, the drone is able to arm and start the mission
-    //The flight is need to be controlled from now on
-    //Also we need to check on ORVD, whether the flight is still allowed or it is need to be paused
-    
-    const uint32_t CONSTANT_SPEED = 1, CONSTANT_ALTITUDE = 200;
-    const double ACHIVE_DIST = 100;
-    const uint32_t MILLISEC_DELAY = 1000;
-
-    uint32_t homeLevel = commands[0].content.waypoint.altitude;
-
-    uint32_t curWayPoint = getNextWayPoint(0);  
-    double xwp, ywp, zwp;      
-    if (curWayPoint == commandNum) {
-        fprintf(stderr, "[%s] Warning: no waypoints\n", ENTITY_NAME);
-    }
-    else {
-        getPosition(commands[curWayPoint].content.waypoint.latitude,
-                    commands[curWayPoint].content.waypoint.longitude,
-                    commands[curWayPoint].content.waypoint.altitude,
-                    xwp,
-                    ywp,
-                    zwp);
-    }
-
-    while (true) {
-        int32_t latitude, longitude, altitude;
-        if (!getCoords(latitude, longitude, altitude)) {
-            fprintf(stderr, "[%s] Warning: lost connection with drone\n", ENTITY_NAME);
         }
-        else {
-            altitude -= homeLevel;
-            fprintf(stderr, "[%s] Current coordinates >>>>> latitude: %d, longitude: %d, altitude: %d \n", ENTITY_NAME,
-                latitude, longitude, altitude);
-            double xcur, ycur, zcur;
-            getPosition(latitude,
-                        longitude,
-                        altitude,
-                        xcur,
-                        ycur,
-                        zcur);
-            // get next waypoint
-            if (curWayPoint < commandNum && 
-                getDist(xcur, ycur, zcur, xwp, ywp, zwp) < ACHIVE_DIST) {
-                curWayPoint = getNextWayPoint(curWayPoint + 1);
-                if (curWayPoint < commandNum) {
-                    fprintf(stderr, "[%s] Info: going to the next waypoint\n", ENTITY_NAME);
-                    getPosition(commands[curWayPoint].content.waypoint.latitude,
-                                commands[curWayPoint].content.waypoint.longitude,
-                                commands[curWayPoint].content.waypoint.altitude,
-                                xwp,
-                                ywp,
-                                zwp);
+        fprintf(stderr, "[%s] Warning: Arm was not allowed. Waiting for another arm request from autopilot\n", ENTITY_NAME);
+    }
+
+    // If we get here, the drone is able to arm and start the mission
+    // The flight needs to be controlled from now on
+    // Also we need to check on ORVD whether the flight is still allowed or needs to be paused
+    const uint32_t CONSTANT_SPEED = 1;
+    const double WAYPOINT_REACHED_RADIUS = 1.0; // Radius in meters
+
+    // Get initial home altitude
+    int32_t initialAltitudeCm = commands[0].content.waypoint.altitude;
+    double initialAltitudeM = static_cast<double>(initialAltitudeCm) / 100.0;
+
+    uint32_t currentWaypoint = getNextWayPoint(0);
+    double waypointX = 0.0, waypointY = 0.0, waypointZ = 0.0;
+    if (currentWaypoint == commandNum) {
+        fprintf(stderr, "[%s] Warning: No waypoints available\n", ENTITY_NAME);
+    } else {
+        getPosition(commands[currentWaypoint].content.waypoint.latitude, commands[currentWaypoint].content.waypoint.longitude, commands[currentWaypoint].content.waypoint.altitude, waypointX, waypointY, waypointZ);
+        fprintf(stderr, "[%s] Info: Heading to waypoint %u at (%f, %f, %f)\n", ENTITY_NAME, currentWaypoint, waypointX, waypointY, waypointZ);
+    }
+
+    double totalDistance = 0.0;
+    double lastX = 0.0, lastY = 0.0, lastZ = 0.0;
+    if (currentWaypoint < commandNum) {
+        getPosition(commands[currentWaypoint].content.waypoint.latitude, commands[currentWaypoint].content.waypoint.longitude, commands[currentWaypoint].content.waypoint.altitude, lastX, lastY, lastZ);
+    }
+    time_t startTime;
+    bool timerStarted = false;
+
+    // Create an array to remember which waypoints need cargo drop
+    uint32_t* cargoDropWaypoints = (uint32_t*)calloc(commandNum, sizeof(uint32_t));
+    uint32_t dropCount = 0;
+    for (uint32_t i = 0; i < commandNum; i++) {
+        if (commands[i].type == CommandType::SET_SERVO) {
+            cargoDropWaypoints[dropCount++] = getNextWayPoint(i + 1); // Store the waypoint after SET_SERVO command
+        }
+    }
+    uint32_t nextDropIndex = 0;
+
+    // Timer variables
+    time_t lastPrintTime = time(NULL);
+
+    while (currentWaypoint < commandNum) {
+        int32_t latitude = 0, longitude = 0, altitudeCm = 0;
+        if (!getCoords(latitude, longitude, altitudeCm)) {
+            fprintf(stderr, "[%s] Warning: Lost connection with drone\n", ENTITY_NAME);
+            continue;
+        } else {
+            // Output received coordinates
+            fprintf(stderr, "[%s] Info: Got coordinates: latitude: %d, longitude: %d, altitude: %d\n", ENTITY_NAME, latitude, longitude, altitudeCm);
+
+            double currentX, currentY, currentZ;
+            double altitudeM = static_cast<double>(altitudeCm) / 100.0 - initialAltitudeM; // Adjust altitude based on initial altitude
+            getPosition(latitude, longitude, altitudeCm, currentX, currentY, currentZ);
+            currentZ = altitudeM;
+
+            if (!timerStarted) {
+                startTime = time(NULL);
+                timerStarted = true;
+                fprintf(stderr, "[%s] Info: Timer started\n", ENTITY_NAME);
+            }
+
+            // Output current coordinates
+            fprintf(stderr, "[%s] Current coordinates: latitude: %d, longitude: %d, altitude: %.2f meters\n", ENTITY_NAME, latitude, longitude, altitudeM);
+            fprintf(stderr, "[%s] Following waypoint: %u\n", ENTITY_NAME, currentWaypoint);
+
+            // Calculate distance from last position
+            double segmentDistance = distance3D(lastX, lastY, lastZ, currentX, currentY, currentZ);
+            totalDistance += segmentDistance;
+            lastX = currentX;
+            lastY = currentY;
+            lastZ = currentZ;
+
+            // Check if the current waypoint is reached
+            double distanceToWaypoint = distance3D(currentX, currentY, currentZ, waypointX, waypointY, waypointZ);
+            fprintf(stderr, "[%s] Debug: Distance to waypoint %u: %f meters\n", ENTITY_NAME, currentWaypoint, distanceToWaypoint);
+
+            // Calculate the perpendicular distance to the current segment
+            double minDistance;
+            uint32_t currentSegment = getClosestSegment(currentX, currentY, currentZ, minDistance);
+            fprintf(stderr, "[%s] Currently in segment: %u to %u\n", ENTITY_NAME, currentSegment - 1, currentSegment);
+            fprintf(stderr, "[%s] Perpendicular distance to segment: %.2f meters\n", ENTITY_NAME, minDistance);
+
+            // Variable to store deviation distance
+            const double DEVIATION_THRESHOLD = 0.5;
+
+            // Check if the perpendicular distance is greater than the deviation threshold
+            if (minDistance > DEVIATION_THRESHOLD) {
+                // Correct the path
+                if (changeWaypoint(commands[currentWaypoint].content.waypoint.latitude,
+                                   commands[currentWaypoint].content.waypoint.longitude,
+                                   commands[currentWaypoint].content.waypoint.altitude) != 1) {
+                    fprintf(stderr, "[%s] Warning: Failed to change waypoint\n", ENTITY_NAME);
+                } else {
+                    fprintf(stderr, "[%s] Info: Changed waypoint to (%d, %d, %d)\n", ENTITY_NAME,
+                            commands[currentWaypoint].content.waypoint.latitude,
+                            commands[currentWaypoint].content.waypoint.longitude,
+                            commands[currentWaypoint].content.waypoint.altitude);
                 }
             }
-        }
 
-        // // Ensure altitude is constant
-        // if (!changeAltitude(CONSTANT_ALTITUDE)) {
-        //     fprintf(stderr, "[%s] Warning: Failed to set constant altitude\n", ENTITY_NAME);
-        // } else {
-        //     fprintf(stderr, "[%s] Info: Altitude set to %d cm\n", ENTITY_NAME, CONSTANT_ALTITUDE);
-        // }
+            if (distanceToWaypoint < WAYPOINT_REACHED_RADIUS) {
+                fprintf(stderr, "[%s] Info: Waypoint %u reached. Waiting for 2 seconds before proceeding to next waypoint.\n", ENTITY_NAME, currentWaypoint);
 
-        // Ensure cargo drop is always disabled
-        if (!setCargoLock(0)) {
-            fprintf(stderr, "[%s] Warning: Failed to disable cargo drop\n", ENTITY_NAME);
-        } else {
-            fprintf(stderr, "[%s] Info: Cargo drop is disabled\n", ENTITY_NAME);
+                currentWaypoint = getNextWayPoint(currentWaypoint + 1);
+                if (currentWaypoint < commandNum) {
+                    getPosition(commands[currentWaypoint].content.waypoint.latitude, commands[currentWaypoint].content.waypoint.longitude, commands[currentWaypoint].content.waypoint.altitude, waypointX, waypointY, waypointZ);
+                    fprintf(stderr, "[%s] Info: Heading to waypoint %u at (%f, %f, %f)\n", ENTITY_NAME, currentWaypoint, waypointX, waypointY, waypointZ);
+                }
+            }
+
+            // Check if we need to release cargo at the next waypoint
+            if (nextDropIndex < dropCount && currentWaypoint == cargoDropWaypoints[nextDropIndex]) {
+                if (!setCargoLock(1)) {
+                    fprintf(stderr, "[%s] Warning: Failed to enable cargo drop\n", ENTITY_NAME);
+                } else {
+                    fprintf(stderr, "[%s] Info: Cargo drop is enabled at waypoint %u\n", ENTITY_NAME);
+                    sleep(3); // Delay for cargo drop
+                    if (!setCargoLock(0)) {
+                        fprintf(stderr, "[%s] Warning: Failed to disable cargo drop\n", ENTITY_NAME);
+                    } else {
+                        fprintf(stderr, "[%s] Info: Cargo drop is disabled\n", ENTITY_NAME);
+                    }
+                    nextDropIndex++;
+                }
+            } else {
+                // Ensure cargo drop is disabled when not at a drop point
+                if (!setCargoLock(0)) {
+                    fprintf(stderr, "[%s] Warning: Failed to ensure cargo drop is disabled\n", ENTITY_NAME);
+                }
+            }
         }
 
         // Ensure constant speed
@@ -242,9 +346,24 @@ int main(void) {
             fprintf(stderr, "[%s] Info: Speed set to %d m/s\n", ENTITY_NAME, CONSTANT_SPEED);
         }
 
+        // Check if a second has passed and print the elapsed time
+        time_t currentTime = time(NULL);
+        if (difftime(currentTime, lastPrintTime) >= 1.0) {
+            lastPrintTime = currentTime;
+            double elapsedSeconds = difftime(currentTime, startTime);
+            fprintf(stderr, "[%s] Elapsed time: %.0f seconds\n", ENTITY_NAME, elapsedSeconds);
+        }
 
-        usleep(MILLISEC_DELAY);
+        // Delay for 500 milliseconds
+        usleep(500000); // Delay for 500 milliseconds
     }
+
+    time_t endTime = time(NULL);
+    double totalTime = difftime(endTime, startTime);
+    fprintf(stderr, "[%s] Mission completed. Total distance: %.2f meters, Total time: %.2f seconds\n", ENTITY_NAME, totalDistance, totalTime);
+
+    // Free the allocated memory for cargo drop waypoints
+    free(cargoDropWaypoints);
 
     return EXIT_SUCCESS;
 }
