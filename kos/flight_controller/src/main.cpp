@@ -14,7 +14,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <limits.h>
-// #include <algorithm>
+#include <string>
 
 #define RETRY_DELAY_SEC 1
 #define RETRY_REQUEST_DELAY_SEC 5
@@ -116,10 +116,14 @@ P getClosestPoint(P p, P f, P s) {
     return closest;
 }
 
+bool isKilled = false;
+
 void kill() {
+    if (isKilled) return;
     fprintf(stderr, "[%s] Killing dron\n", ENTITY_NAME);
     enableBuzzer();
     setKillSwitch(0);
+    isKilled = true;
 }
 
 int sendSignedMessage(const char* method, char* response, const char* errorMessage, uint8_t delay) {
@@ -143,31 +147,38 @@ int sendSignedMessage(const char* method, char* response, const char* errorMessa
     }
     return 1;
 }
-/*
+
 bool isKillSwitch() {
-    const int32_t
+    const int32_t MAX_PINGS = 1;
     char killResponse[1024] = {0};
-    sendSignedMessage(, , "killSwitch", RETRY_DELAY_SEC);
     char message[512] = {0};
     char signature[257] = {0};
     char request[1024] = {0};
-    snprintf(message, 512, "%s?%s", "/api/killSwitch", BOARD_ID);
-    while (!signMessage(message, signature)) {
+    snprintf(message, 512, "%s?%s", "/api/kill_switch", BOARD_ID);
+    int32_t numPings = MAX_PINGS;
+    while (!signMessage(message, signature) && --numPings) {
         fprintf(stderr, "[%s] Warning: Failed to sign killSwitch message at Credential Manager. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
+        if (--numPings) return false;
         sleep(RETRY_DELAY_SEC);
     }
     snprintf(request, 1024, "%s&sig=0x%s", message, signature);
+    numPings = MAX_PINGS;
     while (!sendRequest(request, killResponse)) {
         fprintf(stderr, "[%s] Warning: Failed to send killSwitch request through Server Connector. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
+        if (--numPings) return false;
         sleep(RETRY_DELAY_SEC);
     }
     uint8_t authenticity = 0;
+    numPings = MAX_PINGS;
     while (!checkSignature(killResponse, authenticity) || !authenticity) {
         fprintf(stderr, "[%s] Warning: Failed to check signature of killSwitch response received through Server Connector. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
+        if (--numPings) return false;
         sleep(RETRY_DELAY_SEC);
     }
+    fprintf(stderr, "[%s] KillSwitch response: %s \n", ENTITY_NAME, killResponse);
+    return (strstr(killResponse, "$KillSwitch: 0#") != NULL);
 }
-*/
+
 
 int main(void) {
     // Ensure that other modules are ready to work
@@ -307,7 +318,10 @@ int main(void) {
         }
 
         // checking killSitch from ORVD
-        // if () kill();
+        if (isKillSwitch()) {
+            kill();
+            break;
+        }
 
         // getting coords
         PointOrig curOrig;
@@ -389,6 +403,7 @@ int main(void) {
             if (difftime(time(NULL), landingTime) >= MAX_LANDING_TIME) {
                 fprintf(stderr, "[%s] Too long landing\n", ENTITY_NAME);
                 kill();
+                break;
             }
         } else {
             landingStarted = false;
