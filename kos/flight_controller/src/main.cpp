@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <limits.h>
+#include <sstream>
 #include <string>
 
 #define RETRY_DELAY_SEC 1
@@ -21,12 +22,14 @@
 #define FLY_ACCEPT_PERIOD_US 500000
 
 const double EARTH_RADIUS = 6371000.0; // Earth radius
-const double DEVIATION_THRESHOLD = 1; // Variable to store deviation distance
-const double DEVIATION_ALTITUDE = 0.2; // Variable to store deviation distance
-const uint32_t CONSTANT_SPEED = 3;
-const double WAYPOINT_REACHED_RADIUS = 2; // Radius in meters
+const double DEVIATION_THRESHOLD = 2; // Variable to store deviation distance
+const double DEVIATION_ALTITUDE = 1; // Variable to store deviation distance
+const uint32_t CONSTANT_SPEED = 1; // 2;
+const double WAYPOINT_REACHED_RADIUS = 2; // 4; // Radius in meters
 const uint32_t PING_DELAY_MLSEC = 500;
 const double MAX_LANDING_TIME = 15;
+const uint32_t WAIT_TO_DISARM_SEC = 15;
+const double CONST_ALT = 0; // 6298;
 
 
 extern uint32_t commandNum;
@@ -148,37 +151,80 @@ int sendSignedMessage(const char* method, char* response, const char* errorMessa
     return 1;
 }
 
-bool isKillSwitch() {
-    const int32_t MAX_PINGS = 1;
-    char killResponse[1024] = {0};
+// getting one bool flag from ORVD
+bool sendOneMessage(const char* method, const char* responseName) {
     char message[512] = {0};
     char signature[257] = {0};
     char request[1024] = {0};
-    snprintf(message, 512, "%s?%s", "/api/kill_switch", BOARD_ID);
-    int32_t numPings = MAX_PINGS;
-    while (!signMessage(message, signature) && --numPings) {
-        fprintf(stderr, "[%s] Warning: Failed to sign killSwitch message at Credential Manager. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
-        if (--numPings) return false;
-        sleep(RETRY_DELAY_SEC);
+    char response[1024] = {0};
+
+    fprintf(stderr, "[%s] Sending message to %s\n", ENTITY_NAME, method);
+    snprintf(message, 512, "%s?%s", method, BOARD_ID);
+    if (!signMessage(message, signature)) {
+        fprintf(stderr, "[%s] Warning: Failed to sign %s message at Credential Manager\n", ENTITY_NAME, method);
+        return false;
     }
+    // fprintf(stderr, "[%s] Got signature%s\n", ENTITY_NAME, method);
     snprintf(request, 1024, "%s&sig=0x%s", message, signature);
-    numPings = MAX_PINGS;
-    while (!sendRequest(request, killResponse)) {
-        fprintf(stderr, "[%s] Warning: Failed to send killSwitch request through Server Connector. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
-        if (--numPings) return false;
-        sleep(RETRY_DELAY_SEC);
+    if (!sendRequest(request, response)) {
+        fprintf(stderr, "[%s] Warning: Failed to send %s request through Server Connector\n", ENTITY_NAME, method);
+        return false;
     }
+    // fprintf(stderr, "[%s] Got response%s\n", ENTITY_NAME, method);
     uint8_t authenticity = 0;
-    numPings = MAX_PINGS;
-    while (!checkSignature(killResponse, authenticity) || !authenticity) {
-        fprintf(stderr, "[%s] Warning: Failed to check signature of killSwitch response received through Server Connector. Trying again in %ds\n", ENTITY_NAME, RETRY_DELAY_SEC);
-        if (--numPings) return false;
-        sleep(RETRY_DELAY_SEC);
+    if (!checkSignature(response, authenticity) || !authenticity) {
+        fprintf(stderr, "[%s] Warning: Failed to check signature of %s response received through Server Connector\n", ENTITY_NAME, method);
+        return false;
     }
-    fprintf(stderr, "[%s] KillSwitch response: %s \n", ENTITY_NAME, killResponse);
-    return (strstr(killResponse, "$KillSwitch: 0#") != NULL);
+    fprintf(stderr, "[%s] Have response: %s\n", ENTITY_NAME, response);
+    return (strstr(response, ("$" + std::string(responseName) + ": 0#").c_str()) != NULL);
 }
 
+bool isKillSwitch() {
+    return sendOneMessage("/api/kill_switch", "KillSwitch");
+}
+
+bool isArmed() {
+    return sendOneMessage("/api/arm", "Arm");
+}
+
+bool isFlyAccept() {
+    return sendOneMessage("/api/fly_accept", "Arm");
+}
+
+// waiting for disarm
+bool isWaitForDisarm() {
+
+    fprintf(stderr, "[%s] Waiting for disarm 15 sec\n", ENTITY_NAME);
+    uint32_t numTries = WAIT_TO_DISARM_SEC;
+    while (numTries--) {
+        if (!isFlyAccept()) {
+            return 1;
+        }
+        fprintf(stderr, "[%s] Waiting for disarm 1 sec\n", ENTITY_NAME);
+        sleep(1);
+    }
+    return 0;
+}
+
+// waiting for arm
+void waitForArm() {
+    while (true) {
+        if (isFlyAccept()) {
+            return;
+        }
+        fprintf(stderr, "[%s] Waiting for arm and fly accept 1 sec\n", ENTITY_NAME);
+        sleep(1);
+    }
+}
+
+template <typename T>
+std::string toString(T const& value) {
+    std::stringstream sstr;
+    sstr << value;
+    return sstr.str();
+}
+//16118 +98,2
 
 int main(void) {
     // Ensure that other modules are ready to work
@@ -275,7 +321,7 @@ int main(void) {
     }
 
     // takeoff point
-    uint32_t curWaypoint = 1;
+    uint32_t curWaypoint = 2;
    
     Point lastMoment = points[0];
     fprintf(stderr, "[%s] Info: Heading to waypoint %u at (%.2f, %.2f, %.2f)\n", ENTITY_NAME, curWaypoint, points[curWaypoint].x, points[curWaypoint].y, points[curWaypoint].z);
@@ -297,25 +343,16 @@ int main(void) {
         }
     }
 
+    bool havePause = false;
+
+    if (!setCargoLock(0)) {
+        fprintf(stderr, "[%s] Warning: Failed to ensure cargo drop is disabled\n", ENTITY_NAME);
+    }
+
     while (curWaypoint < commandNum - 1) {
         struct timespec tw = {0, (uint32_t)1e6 * PING_DELAY_MLSEC};
         struct timespec tr;
         nanosleep(&tw, &tr);
-
-        // Ensure constant speed
-        if (!changeSpeed(CONSTANT_SPEED)) {
-            fprintf(stderr, "[%s] Warning: Failed to set constant speed\n", ENTITY_NAME);
-        } else {
-            fprintf(stderr, "[%s] Info: Speed set to %d m/s\n", ENTITY_NAME, CONSTANT_SPEED);
-        }
-
-        // Check if a second has passed and print the elapsed time
-        time_t curTime = time(NULL);
-        if (difftime(curTime, lastPrintTime) >= 1.0) {
-            lastPrintTime = curTime;
-            double elapsedSeconds = difftime(curTime, startTime);
-            fprintf(stderr, "[%s] Elapsed time: %.0f seconds\n", ENTITY_NAME, elapsedSeconds);
-        }
 
         // checking killSitch from ORVD
         if (isKillSwitch()) {
@@ -329,6 +366,8 @@ int main(void) {
             fprintf(stderr, "[%s] Warning: Lost connection with drone\n", ENTITY_NAME);
             continue;
         }
+        curOrig.z -= CONST_ALT;
+
         // Output received coordinates
         fprintf(stderr, "[%s] Info: Got coordinates: latitude: %d, longitude: %d, altitude: %d\n", ENTITY_NAME, curOrig.x, curOrig.y, curOrig.z);
 
@@ -368,66 +407,101 @@ int main(void) {
         fprintf(stderr, "[%s] Perpendicular distance to segment: %.2f meters\n", ENTITY_NAME, minDistance);
         fprintf(stderr, "[%s] Altitude deviation threshold: %.2f meters\n", ENTITY_NAME, altitudeDeviation);
 
-        // Correcting x and y coordinates
-        if (minDistance > DEVIATION_THRESHOLD) {
-            // Correct the path
-            if (changeWaypoint(pClosestOrig.x, pClosestOrig.y, pClosestOrig.z)) {
-                fprintf(stderr, "[%s] Info: Changed waypoint to (%d, %d, %d)\n", ENTITY_NAME,
-                    pClosestOrig.x, pClosestOrig.y, pClosestOrig.z);
-                fprintf(stderr, "[%s] In metres (%.2f, %.2f, %.2f)\n", ENTITY_NAME,
-                    pClosest.x, pClosest.y, pClosest.z);
-            } else {
-                fprintf(stderr, "[%s] Warning: Failed to change waypoint\n", ENTITY_NAME);
-            }
-        }
-
         bool isLanding = (
             pointsOrig[curWaypoint].x == pointsOrig[curWaypoint - 1].x && 
             pointsOrig[curWaypoint].y == pointsOrig[curWaypoint - 1].y &&
             pointsOrig[curWaypoint].z < pointsOrig[curWaypoint - 1].z
         );
 
-        // Correcting altitude
-        if (altitudeDeviation > DEVIATION_ALTITUDE && !isLanding) {
-            if (changeAltitude(pClosestOrig.z)) {
-                fprintf(stderr, "[%s] Info: Changed altitude to %d\n", ENTITY_NAME, pClosestOrig.z);
-            } else {
-                fprintf(stderr, "[%s] Warning: Failed to change altitude\n", ENTITY_NAME);
-            }
-        }
-
-        if (isLanding && !landingStarted) {
-            landingStarted = true;
-            landingTime = time(NULL);
-        } else if (isLanding) {
-            if (difftime(time(NULL), landingTime) >= MAX_LANDING_TIME) {
-                fprintf(stderr, "[%s] Too long landing\n", ENTITY_NAME);
+        // Correcting x and y coordinates
+        if (minDistance > DEVIATION_THRESHOLD) {
+            // Correct the path
+            if (curWaypoint == 9) {
+                fprintf(stderr, "[%s] Deviation is too big\n", ENTITY_NAME);
                 kill();
                 break;
             }
-        } else {
-            landingStarted = false;
-        }
+        } 
+        // else {
+            // Correcting altitude
+            if (altitudeDeviation > DEVIATION_ALTITUDE && !isLanding) {
+                if (curWaypoint == 4 || curWaypoint == 5) {
+                    if (changeAltitude(pClosestOrig.z)) {
+                        fprintf(stderr, "[%s] Info: Changed altitude to %d\n", ENTITY_NAME, pClosestOrig.z);
+                    } else {
+                        fprintf(stderr, "[%s] Warning: Failed to change altitude\n", ENTITY_NAME);
+                    }
+                }
+                else if (curWaypoint == 9) {
+                    fprintf(stderr, "[%s] Too high\n", ENTITY_NAME);
+                    kill();
+                    break;
+                }
+            }
+        // }
+
+        // if (isLanding && !landingStarted) {
+        //     landingStarted = true;
+        //     landingTime = time(NULL);
+        // } else if (isLanding) {
+        //     if (difftime(time(NULL), landingTime) >= MAX_LANDING_TIME) {
+        //         fprintf(stderr, "[%s] Too long landing\n", ENTITY_NAME);
+        //         kill();
+        //         break;
+        //     }
+        // } else {
+        //     landingStarted = false;
+        // }
 
         // Check if the cur waypoint is reached
         if (distanceToWaypoint <= WAYPOINT_REACHED_RADIUS) {
             fprintf(stderr, "[%s] Info: Waypoint %u reached!!!\n", ENTITY_NAME, curWaypoint);
             ++curWaypoint;
+            if (curWaypoint == 9) {
+                sleep(3);
+            }
+        }
+
+        // checking waypoint 2 position to pause
+        if (curWaypoint == 3 && !havePause) {
+            havePause = true;
+            if (isWaitForDisarm()) {
+                fprintf(stderr, "[%s] Pausing flight...\n", ENTITY_NAME);
+                pauseFlight();
+                fprintf(stderr, "[%s] Waiting for arm...\n", ENTITY_NAME);
+                waitForArm();
+                fprintf(stderr, "[%s] Resuming flight...\n", ENTITY_NAME);
+                resumeFlight();
+            }
         }
 
         // Check if we need to release cargo at the next waypoint
-        if (!isDroped && (curWaypoint == cargoDropWaypoint || (curWaypoint == cargoDropWaypoint - 1 && distanceToWaypoint <= 2 * WAYPOINT_REACHED_RADIUS))) {
+        if (!isDroped && curWaypoint == 6) {
             if (setCargoLock(1)) {
                 fprintf(stderr, "[%s] Info: Cargo drop is enabled at waypoint %u\n", ENTITY_NAME, curWaypoint);
             } else {
                 fprintf(stderr, "[%s] Warning: Failed to enable cargo drop\n", ENTITY_NAME);
             }
             isDroped = true;
-        } else if (!isDroped) {
-            // Ensure cargo drop is disabled when not at a drop point
-            if (!setCargoLock(0)) {
-                fprintf(stderr, "[%s] Warning: Failed to ensure cargo drop is disabled\n", ENTITY_NAME);
+        }
+
+        // Ensure constant speed
+        //if (curWaypoint == 5) {
+            if (!changeSpeed(CONSTANT_SPEED)) {
+                fprintf(stderr, "[%s] Warning: Failed to set constant speed\n", ENTITY_NAME);
+            } else {
+                fprintf(stderr, "[%s] Info: Speed set to %d m/s\n", ENTITY_NAME, CONSTANT_SPEED);
             }
+        //}
+
+        sendOneMessage(("/Logs1/" + toString(curWaypoint) + "!!!" + toString(distanceToWaypoint)).c_str(), "Logs1");
+        sendOneMessage(("/Logs2/" + toString(curOrig.x) + "!!!" + toString(curOrig.y) + "!!!" + toString(curOrig.z)).c_str(), "Logs2");
+        // Check if a second has passed and print the elapsed time
+        time_t curTime = time(NULL);
+        if (difftime(curTime, lastPrintTime) >= 1.0) {
+            lastPrintTime = curTime;
+            double elapsedSeconds = difftime(curTime, startTime);
+            fprintf(stderr, "[%s] Elapsed time: %.0f seconds\n", ENTITY_NAME, elapsedSeconds);
         }
     }
     sleep(5);

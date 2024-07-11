@@ -69,7 +69,7 @@ fi
 "$SDK_PREFIX/toolchain/bin/cmake" -G "Unix Makefiles" -B "$BUILD" \
       -D SIMULATION="TRUE" \
       -D SERVER="FALSE" \
-      -D BOARD_ID="11" \
+      -D BOARD_ID="19" \
       -D SIMULATOR_IP=$SIMULATOR_IP \
       -D CMAKE_BUILD_TYPE:STRING=Debug \
       -D CMAKE_INSTALL_PREFIX:STRING="$INSTALL_PREFIX" \
