@@ -139,8 +139,7 @@ int parseCommands(char* str) {
         }
         default:
             fprintf(stderr, "[%s] Warning: Cannot parse an unknown command %c\n", ENTITY_NAME, str[ptr]);
-            free(commands);
-            return 0;
+            --i;
         }
         ptr = end + 1;
     }

@@ -58,3 +58,7 @@ mav.tlog.raw
 eeprom.bin
 logs
 terrain
+
+mavproxy
+output.txt
+typescript
