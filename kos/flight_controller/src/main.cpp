@@ -309,8 +309,12 @@ int main(void) {
     }
 
     // Get initial home altitude
+    PointOrig homeCords;
     int32_t homeSmZ = commands[0].content.waypoint.altitude;
-    double startZ = (double)(homeSmZ) / 100.0;
+    if (!getCoords(homeCords.x, homeCords.y, homeSmZ)) {
+        fprintf(stderr, "[%s] Warning: Lost connection with drone\n", ENTITY_NAME);
+    }
+    fprintf(stderr, "[%s] Got home alt %d\n", ENTITY_NAME, homeSmZ);
 
     Point* points = (Point*)malloc((commandNum - 1) * sizeof(Point));
     PointOrig* pointsOrig = (PointOrig*)malloc((commandNum - 1) * sizeof(PointOrig));
@@ -322,7 +326,7 @@ int main(void) {
 
     // takeoff point
     uint32_t curWaypoint = 2;
-   
+
     Point lastMoment = points[0];
     fprintf(stderr, "[%s] Info: Heading to waypoint %u at (%.2f, %.2f, %.2f)\n", ENTITY_NAME, curWaypoint, points[curWaypoint].x, points[curWaypoint].y, points[curWaypoint].z);
 
@@ -366,7 +370,7 @@ int main(void) {
             fprintf(stderr, "[%s] Warning: Lost connection with drone\n", ENTITY_NAME);
             continue;
         }
-        curOrig.z -= CONST_ALT;
+        curOrig.z -= homeSmZ;
 
         // Output received coordinates
         fprintf(stderr, "[%s] Info: Got coordinates: latitude: %d, longitude: %d, altitude: %d\n", ENTITY_NAME, curOrig.x, curOrig.y, curOrig.z);
@@ -374,7 +378,7 @@ int main(void) {
         // converting coords
         Point cur;
         convertPoint(curOrig, cur);
-        cur.z = (double)(curOrig.z) / 100.0 - startZ;
+        cur.z = (double)(curOrig.z) / 100.0;
 
         // Output cur coordinates
         fprintf(stderr, "[%s] Cur coordinates: latitude: %.2f, longitude: %.2f, altitude: %.2f meters\n", ENTITY_NAME, cur.x, cur.y, cur.z);
@@ -400,7 +404,7 @@ int main(void) {
         // getting closest point
         Point pClosest = getClosestPoint(cur, points[curWaypoint - 1], points[curWaypoint]);
         PointOrig pClosestOrig = getClosestPoint(curOrig, pointsOrig[curWaypoint - 1], pointsOrig[curWaypoint]);
-        
+
         // distance to segment
         double minDistance = distance2D(cur, pClosest);
         double altitudeDeviation = abs(pClosest.z - cur.z);
@@ -408,7 +412,7 @@ int main(void) {
         fprintf(stderr, "[%s] Altitude deviation threshold: %.2f meters\n", ENTITY_NAME, altitudeDeviation);
 
         bool isLanding = (
-            pointsOrig[curWaypoint].x == pointsOrig[curWaypoint - 1].x && 
+            pointsOrig[curWaypoint].x == pointsOrig[curWaypoint - 1].x &&
             pointsOrig[curWaypoint].y == pointsOrig[curWaypoint - 1].y &&
             pointsOrig[curWaypoint].z < pointsOrig[curWaypoint - 1].z
         );
@@ -421,7 +425,7 @@ int main(void) {
                 kill();
                 break;
             }
-        } 
+        }
         // else {
             // Correcting altitude
             if (altitudeDeviation > DEVIATION_ALTITUDE && !isLanding) {
