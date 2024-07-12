@@ -23,9 +23,9 @@
 
 const double EARTH_RADIUS = 6371000.0; // Earth radius
 const double DEVIATION_THRESHOLD = 2; // Variable to store deviation distance
-const double DEVIATION_ALTITUDE = 1; // Variable to store deviation distance
+const double DEVIATION_ALTITUDE = 1.5; // Variable to store deviation distance
 const uint32_t CONSTANT_SPEED = 2;
-const double WAYPOINT_REACHED_RADIUS = 2; // 4; // Radius in meters
+const double WAYPOINT_REACHED_RADIUS = 3; // 4; // Radius in meters
 const uint32_t PING_DELAY_MLSEC = 500;
 const double MAX_LANDING_TIME = 15;
 const uint32_t WAIT_TO_DISARM_SEC = 15;
